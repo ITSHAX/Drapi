@@ -12,9 +12,9 @@ async def scrape_copart(lot: str):
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         try:
-            await page.goto(url, timeout=30000)
-            # انتظر عنصر رئيسي يدل على أن الصفحة تم تحميلها
-            await page.wait_for_selector(".lot-detail", timeout=15000)
+           await page.goto(url, timeout=10000)  # 10 ثواني فقط
+await page.wait_for_selector(".lot-detail", timeout=5000)  # 5 ثواني فقط
+
 
             # مثال: جلب سنة الصنع، الماركة، الموديل من صفحة كوبارت
             title = await page.locator(".lot-detail h1").inner_text()
@@ -63,8 +63,9 @@ async def scrape_iaa(lot: str):
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         try:
-            await page.goto(url, timeout=30000)
-            await page.wait_for_selector(".vehicle-details", timeout=15000)
+          await page.goto(url, timeout=10000)  # 10 ثواني فقط
+await page.wait_for_selector(".lot-detail", timeout=5000)  # 5 ثواني فقط
+
 
             # مثال جلب بيانات مشابهة من IAA
             title = await page.locator(".vehicle-title").inner_text()
