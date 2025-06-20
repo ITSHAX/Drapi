@@ -1,93 +1,158 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import JSONResponse
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+import asyncio
 import re
-import requests
-
-from playwright.sync_api import sync_playwright
 
 app = FastAPI()
 
-def scrape_copart_lot(lot_number: str) -> dict:
-    url = f"https://www.copart.com/public/data/lotdetails/lotDetails/{lot_number}/USA"
-    headers = {
-        "accept": "application/json",
-        "user-agent": "Mozilla/5.0"
-    }
-
-    r = requests.get(url, headers=headers)
-    if r.status_code != 200 or "data" not in r.json():
-        raise ValueError(f"Copart: Lot not found or blocked ({r.status_code})")
-
-    data = r.json()["data"]
-    return {
-        "lot_number": data.get("lotNumber"),
-        "year": data.get("vehicleDetails", {}).get("year"),
-        "make": data.get("vehicleDetails", {}).get("make"),
-        "model": data.get("vehicleDetails", {}).get("model"),
-        "vin": data.get("vin"),
-        "auction_location": data.get("saleLocation"),
-        "damage": data.get("lotDetails", {}).get("damageDescription"),
-        "odometer": data.get("odometerReading"),
-        "sale_status": data.get("lotDetails", {}).get("saleStatus"),
-        "auction_date": data.get("auctionDate"),
-        "images": [img.get("url") for img in data.get("imagesList", [])],
-        "source": "copart"
-    }
-
-def scrape_iaa_lot(lot_number: str) -> dict:
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(f"https://www.iaai.com/VehicleDetails/{lot_number}", timeout=60000)
-        page.wait_for_timeout(3000)
-
+# دالة مساعدة لاستخلاص بيانات من كوبارت
+async def scrape_copart(lot: str):
+    url = f"https://www.copart.com/lot/{lot}"
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
         try:
-            title = page.locator("h1").inner_text()
-        except:
-            title = "Unknown"
+            await page.goto(url, timeout=30000)
+            # انتظر عنصر رئيسي يدل على أن الصفحة تم تحميلها
+            await page.wait_for_selector(".lot-detail", timeout=15000)
 
+            # مثال: جلب سنة الصنع، الماركة، الموديل من صفحة كوبارت
+            title = await page.locator(".lot-detail h1").inner_text()
+            # مثال: عنوان النموذج: "2020 TOYOTA CAMRY"
+            match = re.match(r"(\d{4})\s+([A-Z]+)\s+(.+)", title, re.I)
+            year, make, model = None, None, None
+            if match:
+                year, make, model = match.group(1), match.group(2), match.group(3)
+
+            vin = await page.locator("xpath=//span[contains(text(),'VIN')]/following-sibling::span").inner_text()
+            damage_desc = await page.locator(".lot-damage-description").inner_text()
+            odometer = await page.locator("xpath=//span[contains(text(),'Odometer')]/following-sibling::span").inner_text()
+            auction_date = await page.locator(".auction-date").inner_text()
+            location = await page.locator(".auction-location").inner_text()
+            sale_status = await page.locator(".sale-status").inner_text()
+
+            # صور (مجموعة) — مثلا في كوبارت الصور داخل عناصر img ضمن div معين
+            images = await page.locator(".gallery-image img").all_attribute("src")
+
+            await browser.close()
+
+            return {
+                "platform": "copart",
+                "lot_number": lot,
+                "year": year,
+                "make": make,
+                "model": model,
+                "vin": vin,
+                "damage_description": damage_desc,
+                "odometer": odometer,
+                "auction_date": auction_date,
+                "auction_location": location,
+                "sale_status": sale_status,
+                "images": images,
+            }
+
+        except PlaywrightTimeout:
+            await browser.close()
+            raise HTTPException(status_code=404, detail="Copart lot not found or page took too long to load")
+
+
+# دالة مساعدة لاستخلاص بيانات من IAA
+async def scrape_iaa(lot: str):
+    url = f"https://www.iaai.com/VehicleDetails/{lot}"
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
         try:
-            vin = page.locator("text=VIN").nth(0).evaluate("el => el.nextElementSibling.textContent")
-        except:
-            vin = "Unknown"
+            await page.goto(url, timeout=30000)
+            await page.wait_for_selector(".vehicle-details", timeout=15000)
 
-        images = page.locator("img").all()
-        img_urls = [img.get_attribute("src") for img in images if img.get_attribute("src") and "vehicleimages" in img.get_attribute("src")]
+            # مثال جلب بيانات مشابهة من IAA
+            title = await page.locator(".vehicle-title").inner_text()
+            match = re.match(r"(\d{4})\s+([A-Z]+)\s+(.+)", title, re.I)
+            year, make, model = None, None, None
+            if match:
+                year, make, model = match.group(1), match.group(2), match.group(3)
 
-        browser.close()
+            vin = await page.locator("xpath=//dt[text()='VIN']/following-sibling::dd[1]").inner_text()
+            damage_desc = await page.locator(".damage-description").inner_text()
+            odometer = await page.locator("xpath=//dt[text()='Odometer']/following-sibling::dd[1]").inner_text()
+            auction_date = await page.locator(".auction-date").inner_text()
+            location = await page.locator(".auction-location").inner_text()
+            sale_status = await page.locator(".sale-status").inner_text()
 
-        return {
-            "lot_number": lot_number,
-            "year": None,
-            "make": None,
-            "model": title,
-            "vin": vin.strip(),
-            "auction_location": "IAA.com",
-            "damage": None,
-            "odometer": None,
-            "sale_status": None,
-            "auction_date": None,
-            "images": img_urls,
-            "source": "iaai"
-        }
+            images = await page.locator(".image-gallery img").all_attribute("src")
 
-def detect_platform_and_scrape(input_str: str) -> dict:
-    if "copart.com" in input_str or re.match(r"^\d{8}$", input_str):
-        lot_number = re.findall(r"\d{8}", input_str)[0]
-        return scrape_copart_lot(lot_number)
-    elif "iaai.com" in input_str:
-        lot_number = re.findall(r"\d+", input_str.split("/")[-1])[0]
-        return scrape_iaa_lot(lot_number)
-    else:
-        raise ValueError("Unsupported or invalid input")
+            await browser.close()
 
+            return {
+                "platform": "iaai",
+                "lot_number": lot,
+                "year": year,
+                "make": make,
+                "model": model,
+                "vin": vin,
+                "damage_description": damage_desc,
+                "odometer": odometer,
+                "auction_date": auction_date,
+                "auction_location": location,
+                "sale_status": sale_status,
+                "images": images,
+            }
+
+        except PlaywrightTimeout:
+            await browser.close()
+            raise HTTPException(status_code=404, detail="IAA lot not found or page took too long to load")
+
+
+# دالة رئيسية لتحديد الموقع واختيار الـ scraper المناسب
 @app.get("/api/get_vehicle_data")
-def get_vehicle_data(lot: str = Query(None), url: str = Query(None)):
-    input_val = lot or url
-    if not input_val:
-        raise HTTPException(status_code=400, detail="Provide lot or url")
-    try:
-        data = detect_platform_and_scrape(input_val)
-        return JSONResponse(content=data)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+async def get_vehicle_data(lot: str = Query(None), url: str = Query(None)):
+    if not lot and not url:
+        raise HTTPException(status_code=400, detail="Must provide lot number or url")
+
+    # تحديد المنصة حسب url أو رقم اللوت
+    target_lot = lot
+    platform = None
+
+    if url:
+        if "copart.com" in url:
+            platform = "copart"
+            # استخراج رقم اللوت من الرابط
+            match = re.search(r"/lot/(\d+)", url)
+            if not match:
+                raise HTTPException(status_code=400, detail="Invalid Copart URL format")
+            target_lot = match.group(1)
+
+        elif "iaai.com" in url:
+            platform = "iaai"
+            match = re.search(r"/VehicleDetails/(\d+)", url)
+            if not match:
+                raise HTTPException(status_code=400, detail="Invalid IAA URL format")
+            target_lot = match.group(1)
+
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported URL domain")
+
+    else:
+        # لو لا يوجد url، نعتمد على رقم اللوت ونجرب تحديد الموقع
+        if lot.isdigit() and len(lot) >= 5:
+            # لتبسيط، افترض أن الأرقام التي تبدأ بـ 5+ هي كوبارت، و 4+ هي IAA (تعديل حسب حاجتك)
+            if lot.startswith("5") or lot.startswith("3"):
+                platform = "copart"
+            else:
+                platform = "iaai"
+        else:
+            raise HTTPException(status_code=400, detail="Invalid lot number format")
+
+    # نوجه للـ scraper المناسب
+    if platform == "copart":
+        return await scrape_copart(target_lot)
+    elif platform == "iaai":
+        return await scrape_iaa(target_lot)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported platform")
+
+
+# لتشغيل محلي:
+# uvicorn main:app --reload
