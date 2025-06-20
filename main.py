@@ -5,7 +5,6 @@ import asyncio
 import re
 
 app = FastAPI()
-
 # دالة مساعدة لاستخلاص بيانات من كوبارت
 async def scrape_copart(lot: str):
     url = f"https://www.copart.com/lot/{lot}"
